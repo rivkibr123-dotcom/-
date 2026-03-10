@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>לוח בחירה פסח אינטראקטיבי - כיתה א'</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, initializeFirestore } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getStorage, ref, uploadString, getDownloadURL } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-storage.js";
+
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = initializeFirestore(app, { experimentalForceLongPolling: true });
+        const storage = getStorage(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'passover-board-v2';
+
+        async function uploadFile(path, dataUrl) {
+            try {
+                const storageRef = ref(storage, path);
+                await uploadString(storageRef, dataUrl, 'data_url');
+                return await getDownloadURL(storageRef);
+            } catch (e) { return null; }
+        }
+
+        window.submitToTeacher = async () => {
+            const studentName = document.getElementById('studentName').value.trim();
+            if (!studentName) { alert("בְּבַקָּשָׁה כִּתְבוּ אֶת הַשֵּׁם שֶׁלָּכֶם!"); return; }
+
+            const loading = document.getElementById('loading');
+            loading.style.display = 'flex';
+
+            try {
+                if (!auth.currentUser) {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else { await signInAnonymously(auth); }
+                }
+
+                const cells = document.querySelectorAll('.cell');
+                const tasksData = [];
+
+                for (let i = 0; i < cells.length; i++) {
+                    const cell = cells[i];
+                    const taskId = i + 1;
+                    let fileUrl = null;
+
+                    const img = cell.querySelector('.preview-img');
+                    if (img && img.src.startsWith('data:image')) {
+                        fileUrl = await uploadFile(`artifacts/${appId}/submissions/${studentName}/task_${taskId}_img`, img.src);
+                    }
+
+                    const audio = cell.querySelector('audio');
+                    if (audio && audio.src && (audio.src.startsWith('blob:') || audio.src.startsWith('data:'))) {
+                        let dataUrl;
+                        if(audio.src.startsWith('blob:')) {
+                            const res = await fetch(audio.src);
+                            const blob = await res.blob();
+                            dataUrl = await new Promise(r => { const rd = new FileReader(); rd.onloadend = () => r(rd.result); rd.readAsDataURL(blob); });
+                        } else { dataUrl = audio.src; }
+                        fileUrl = await uploadFile(`artifacts/${appId}/submissions/${studentName}/task_${taskId}_audio`, dataUrl);
+                    }
+
+                    tasksData.push({
+                        id: taskId,
+                        completed: cell.classList.contains('completed'),
+                        textInput: cell.querySelector('input[type="text"]')?.value || "",
+                        fileUrl: fileUrl
+                    });
+                }
+
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'submissions', studentName), {
+                    studentName, tasks: tasksData, timestamp: new Date().toISOString(), uid: auth.currentUser.uid
+                });
+
+                alert("🎉 כָּל הַכָּבוֹד! הַהַגָּשָׁה נִשְׁלְחָה בְּהַצְלָחָה לַמּוֹרָה.");
+            } catch (err) { alert("שְׁגִיאָה בַּשְּׁלִיחָה."); }
+            finally { loading.style.display = 'none'; }
+        };
+
+        window.toggleDone = (cb) => cb.closest('.cell').classList.toggle('completed', cb.checked);
+        
+        window.handleImg = (input) => {
+            const f = input.files[0];
+            if (f) {
+                const r = new FileReader();
+                r.onload = e => { const img = input.parentElement.querySelector('.preview-img'); img.src = e.target.result; img.style.display = 'block'; };
+                r.readAsDataURL(f);
+            }
+        };
+
+        let rec, chunks = [];
+        window.toggleRec = async (btn, audId) => {
+            const aud = document.getElementById(audId);
+            if (!rec || rec.state === 'inactive') {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                rec = new MediaRecorder(stream);
+                chunks = [];
+                rec.ondataavailable = e => chunks.push(e.data);
+                rec.onstop = () => {
+                    const b = new Blob(chunks, { type: 'audio/wav' });
+                    aud.src = URL.createObjectURL(b); aud.style.display = 'block';
+                };
+                rec.start(); btn.innerText = "🛑 עֲצֹר";
+            } else { rec.stop(); btn.innerText = "🎤 הַקְלֵט"; }
+        };
+
+        window.askAI = async (type, inpId, outId) => {
+            const out = document.getElementById(outId);
+            const val = inpId ? document.getElementById(inpId).value : "";
+            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ contents: [{ parts: [{ text: type === 'riddle' ? "צור חידה קצרה מנוקדת לפסח לילד בכיתה א בלי פתרון" : `האם המשפט "${val}" תקין? המשפט הנכון הוא 'אנחנו אוכלים מצה בפסח'. ענה משוב קצר ומנוקד.` }] }] })
+            });
+            const d = await res.json();
+            out.innerText = d.candidates[0].content.parts[0].text; out.style.display = 'block';
+        };
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Assistant:wght@400;700&display=swap');
+        body { font-family: 'Assistant', sans-serif; background: #fffcf2; direction: rtl; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        .no-print { position: sticky; top: 10px; z-index: 100; background: white; padding: 10px 20px; border-radius: 30px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; max-width: 950px; }
+        .cell { background: white; border: 2px solid #f39c12; border-radius: 20px; padding: 15px; display: flex; flex-direction: column; min-height: 250px; position: relative; }
+        .cell.completed { background: #e8f8f5; border-color: #27ae60; }
+        .cell-mandatory { border: 4px solid #e67e22; }
+        .task-action { margin-top: auto; display: flex; flex-direction: column; gap: 5px; background: #fdfefe; padding: 10px; border-radius: 10px; }
+        .preview-img { max-width: 100%; max-height: 80px; display: none; margin: 5px 0; border-radius: 5px; }
+        #loading { display: none; position: fixed; inset: 0; background: rgba(255,255,255,0.9); z-index: 2000; justify-content: center; align-items: center; font-size: 20px; font-weight: bold; color: #d35400; }
+        h1 { color: #d35400; text-align: center; }
+        button { cursor: pointer; border-radius: 10px; border: none; padding: 5px 10px; font-weight: bold; }
+        .ai-out { font-size: 12px; background: #ebf8ff; padding: 5px; border-radius: 5px; margin-top: 5px; display: none; }
+    </style>
+</head>
+<body>
+    <div id="loading">🚀 שׁוֹלְחִים לַמּוֹרָה...</div>
+    <div class="no-print">
+        <button onclick="submitToTeacher()" style="background: #27ae60; color: white; padding: 10px 20px; font-size: 18px;">🚀 שְׁלַח הַגָּשָׁה לַמּוֹרָה</button>
+    </div>
+
+    <div id="printable-area">
+        <h1>🍷 לוּחַ בְּחִירָה לְפֶסַח - כִּתָּה א' 🍷</h1>
+        <div style="text-align: center; margin-bottom: 20px;">
+            <input type="text" id="studentName" placeholder="הַשֵּׁם שֶׁלִּי..." style="font-size: 20px; padding: 8px; border: 2px solid #d35400; border-radius: 10px; text-align: center;">
+        </div>
+
+        <div class="grid">
+            <!-- 1 -->
+            <div class="cell">
+                <strong>1. חָמֵץ וּמַצָּה</strong>
+                <p>כִּתְבוּ 3 מַאֲכָלִים שֶׁאָסוּר לֶאֱכֹל בְּפֶסַח.</p>
+                <div class="task-action">
+                    <input type="text" placeholder="כִּתְבוּ כָּאן...">
+                    <label><input type="checkbox" onchange="toggleDone(this)"> סִיַּמְתִּי!</label>
+                </div>
+            </div>
+            <!-- 2 -->
+            <div class="cell">
+                <strong>2. מַה נִּשְׁתַּנָּה</strong>
+                <p>הַקְלִיטוּ אֶת עַצְמְכֶם שָׁרִים אֶת הַבַּיִת הָרִאשׁוֹן.</p>
+                <div class="task-action">
+                    <button onclick="toggleRec(this, 'aud1')">🎤 הַקְלֵט</button>
+                    <audio id="aud1" controls style="display:none; width:100%"></audio>
+                    <label><input type="checkbox" onchange="toggleDone(this)"> סִיַּמְתִּי!</label>
+                </div>
+            </div>
+            <!-- 3 -->
+            <div class="cell">
+                <strong>3. סֵדֶר בַּמִּשְׁפָּט</strong>
+                <p>סַדְּרוּ: (בְּפֶסַח, מַצָּה, אֲנַחְנוּ, אוֹכְלִים).</p>
+                <div class="task-action">
+                    <input type="text" id="aiInp" placeholder="הַקְלִידוּ...">
+                    <button onclick="askAI('check', 'aiInp', 'aiOut1')" style="background:#805ad5; color:white;">✨ בְּדִיקָה</button>
+                    <div id="aiOut1" class="ai-out"></div>
+                    <label><input type="checkbox" onchange="toggleDone(this)"> סִיַּמְתִּי!</label>
+                </div>
+            </div>
+            <!-- 4 -->
+            <div class="cell cell-mandatory">
+                <strong>4. קַעֲרַת הַסֵּדֶר (חוֹבָה)</strong>
+                <p>צַיְּרוּ אֶת הַקַּעֲרָה וְצַלְּמוּ.</p>
+                <div class="task-action">
+                    <button onclick="this.nextElementSibling.click()">📸 צַלְּמוּ</button>
+                    <input type="file" accept="image/*" style="display:none" onchange="handleImg(this)">
+                    <img class="preview-img">
+                    <label><input type="checkbox" onchange="toggleDone(this)"> סִיַּמְתִּי!</label>
+                </div>
+            </div>
+            <!-- 5, 6, 7, 8, 9... (המשך המשימות במבנה זהה) -->
+            <div class="cell">
+                <strong>5. חִידַת הַחַג</strong>
+                <div class="task-action">
+                    <button onclick="askAI('riddle', null, 'aiOut2')" style="background:#805ad5; color:white;">✨ קַבְּלוּ חִידָה</button>
+                    <div id="aiOut2" class="ai-out"></div>
+                    <label><input type="checkbox" onchange="toggleDone(this)"> סִיַּמְתִּי!</label>
+                </div>
+            </div>
+            <div class="cell">
+                <strong>6. הַצַּלְמָן הַצָּעִיר</strong>
+                <p>צַלְּמוּ חֵפֶץ מֵהַחַג.</p>
+                <div class="task-action">
+                    <button onclick="this.nextElementSibling.click()">📸 צַלְּמוּ</button>
+                    <input type="file" accept="image/*" style="display:none" onchange="handleImg(this)">
+                    <img class="preview-img">
+                    <label><input type="checkbox" onchange="toggleDone(this)"> סִיַּמְתִּי!</label>
+                </div>
+            </div>
+            <div class="cell">
+                <strong>7. בְּנֵי חוֹרִין</strong>
+                <p>צַיְּרוּ אֶת עַצְמְכֶם נָחִים.</p>
+                <div class="task-action">
+                    <button onclick="this.nextElementSibling.click()">📸 צַלְּמוּ</button>
+                    <input type="file" accept="image/*" style="display:none" onchange="handleImg(this)">
+                    <img class="preview-img">
+                    <label><input type="checkbox" onchange="toggleDone(this)"> סִיַּמְתִּי!</label>
+                </div>
+            </div>
+            <div class="cell">
+                <strong>8. עוֹזְרִים בַּבַּיִת</strong>
+                <div class="task-action">
+                    <input type="text" placeholder="אֵיךְ עָזַרְתִּי?">
+                    <label><input type="checkbox" onchange="toggleDone(this)"> סִיַּמְתִּי!</label>
+                </div>
+            </div>
+            <div class="cell">
+                <strong>9. בְּרָכָה לַחַג</strong>
+                <div class="task-action">
+                    <button onclick="toggleRec(this, 'aud2')">🎤 הַקְלֵט בְּרָכָה</button>
+                    <audio id="aud2" controls style="display:none; width:100%"></audio>
+                    <label><input type="checkbox" onchange="toggleDone(this)"> סִיַּמְתִּי!</label>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
